@@ -1,0 +1,29 @@
+=== watch-button 2026-07-26T16:17:04-04:00 duration=45s ===
+Button: QC play/pause (Siri button on iPhone)
+Mic source: bluez_input.E4:58:BC:80:90:CD
+
+--- HFP feature exchange on last connect (run btmon while reconnecting for live) ---
+Pi should answer +BRSF with voice-rec bit (3684 not 3680) for AT+BVRA from headset
+
+--- initial mic state ---
+338	bluez_input.E4:58:BC:80:90:CD	PipeWire	float32le 1ch 48000Hz	SUSPENDED
+
+--- btmon (45s): AT+BVRA, AVRCP 0x44, BRSF ---
+[pulse] initial: SUSPENDED
+        60 11 0e 00 48 7c 44 00                          `...H|D.        
+        62 11 0e 09 48 7c 44 00                          b...H|D.        
+        70 11 0e 00 48 7c c4 00                          p...H|..        
+        72 11 0e 09 48 7c c4 00                          r...H|..        
+        80 11 0e 00 48 7c 44 00                          ....H|D.        
+        82 11 0e 09 48 7c 44 00                          ....H|D.        
+        90 11 0e 00 48 7c c4 00                          ....H|..        
+        92 11 0e 09 48 7c c4 00                          ....H|..        
+        a0 11 0e 00 48 7c 44 00                          ....H|D.        
+        a2 11 0e 09 48 7c 44 00                          ....H|D.        
+        b0 11 0e 00 48 7c c4 00                          ....H|..        
+        b2 11 0e 09 48 7c c4 00                          ....H|..        
+        61 ef 33 41 54 2b 49 50 48 4f 4e 45 41 43 43 45  a.3AT+IPHONEACCE
+
+--- final mic state ---
+338	bluez_input.E4:58:BC:80:90:CD	PipeWire	float32le 1ch 48000Hz	SUSPENDED
+=== done 2026-07-26T16:17:49-04:00 ===

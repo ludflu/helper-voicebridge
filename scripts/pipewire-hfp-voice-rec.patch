@@ -1,0 +1,78 @@
+diff --git a/spa/plugins/bluez5/backend-native.c b/spa/plugins/bluez5/backend-native.c
+--- a/spa/plugins/bluez5/backend-native.c
++++ b/spa/plugins/bluez5/backend-native.c
+@@ -190,6 +190,7 @@
+ 	unsigned int cind_call_notify:1;
+ 	unsigned int extended_error_reporting:1;
+ 	unsigned int clip_notify:1;
++		unsigned int voice_recognition_active:1;
+ 	unsigned int hfp_hf_3way:1;
+ 	unsigned int hfp_hf_nrec:1;
+ 	unsigned int hfp_hf_clcc:1;
+@@ -854,8 +855,29 @@
+ 		return;
+ 
+ 	rfcomm_send_reply(rfcomm, "+CIEV: 2,%d", rfcomm->cind_call_active);
++}
++
++static void rfcomm_hfp_ag_end_voice_recognition(struct rfcomm *rfcomm)
++{
++	rfcomm_send_reply(rfcomm, "+BVRA:0");
++	spa_log_info(rfcomm->backend->log, "RFCOMM voice recognition stopped");
++		unsigned int voice_recognition_active:1;
++	if (rfcomm->transport) {
++		unsigned int i;
++		for (i = 0; i < 8 && rfcomm->transport->acquire_refcount > 0; i++)
++			spa_bt_transport_release(rfcomm->transport);
++	}
+ }
+ 
++static void rfcomm_hfp_ag_start_voice_recognition(struct rfcomm *rfcomm)
++{
++	rfcomm_send_reply(rfcomm, "+BVRA:1");
++	spa_log_info(rfcomm->backend->log, "RFCOMM voice recognition started");
++		unsigned int voice_recognition_active:1;
++	if (rfcomm->transport)
++		spa_bt_transport_acquire(rfcomm->transport, false);
++}
++
+ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
+ {
+ 	struct impl *backend = rfcomm->backend;
+@@ -914,6 +936,7 @@
+ 		/* send reply to HF with the features supported by Audio Gateway (=computer) */
+ 		ag_features |= mm_supported_features();
+ 		ag_features |= SPA_BT_HFP_AG_FEATURE_HF_INDICATORS | SPA_BT_HFP_AG_FEATURE_ESCO_S4;
++		ag_features |= SPA_BT_HFP_AG_FEATURE_VOICE_RECOG;
+ 		rfcomm_send_reply(rfcomm, "+BRSF: %u", ag_features);
+ 		rfcomm_send_reply(rfcomm, "OK");
+ 	} else if (spa_strstartswith(buf, "AT+BAC=")) {
+@@ -1164,7 +1187,18 @@
+ 		} else {
+ 			spa_log_debug(backend->log, "RFCOMM receive unsupported VGS gain: %s", buf);
+ 			rfcomm_send_error(rfcomm, CMEE_OPERATION_NOT_ALLOWED);
++		}
++	} else if (sscanf(buf, "AT+BVRA=%u", &value) == 1) {
++		rfcomm_send_reply(rfcomm, "OK");
++		unsigned int voice_recognition_active:1;
++			/* Bose QC often re-sends AT+BVRA=1 instead of AT+BVRA=0 on release */
++			rfcomm_hfp_ag_end_voice_recognition(rfcomm);
++		} else if (value == 1) {
++			rfcomm_hfp_ag_start_voice_recognition(rfcomm);
++		} else {
++			rfcomm_hfp_ag_end_voice_recognition(rfcomm);
+ 		}
++		return true;
+ 	} else if (spa_strstartswith(buf, "AT+BIND=?")) {
+ 		rfcomm_send_reply(rfcomm, "+BIND: (2)");
+ 		rfcomm_send_reply(rfcomm, "OK");
+@@ -1210,7 +1244,8 @@
+ 		}
+ 		rfcomm_send_reply(rfcomm, "OK");
+ 	} else if (spa_strstartswith(buf, "AT+APLSIRI?")) {
+-		// This command is sent when we activate Apple extensions
++		/* Bose QC checks Siri support when +XAPL=iPhone was negotiated */
++		rfcomm_send_reply(rfcomm, "+APLSIRI:1");
+ 		rfcomm_send_reply(rfcomm, "OK");
+ 	} else if (!mm_is_available(backend->modemmanager)) {
+ 		spa_log_warn(backend->log, "RFCOMM receive command but modem not available: %s", buf);
