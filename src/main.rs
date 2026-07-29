@@ -1,5 +1,6 @@
 mod core;
 mod dbus_hfp;
+mod grpc_transcribe;
 mod pipeline;
 
 use anyhow::Result;
@@ -31,7 +32,11 @@ async fn main() -> Result<()> {
         whisper_model: std::env::var("WHISPER_MODEL")
             .unwrap_or_else(|_| "/opt/whisper/models/ggml-base.en.bin".into())
             .into(),
-        pulse_source,
+        pulse_source: pulse_source.clone(),
+        pulse_sink: std::env::var("PULSE_SINK")
+            .ok()
+            .or_else(|| pipeline::pulse_sink_from_source(&pulse_source)),
+        whisper_grpc_addr: std::env::var("WHISPER_GRPC_ADDR").ok(),
         capture_sco_delay_ms,
     };
 

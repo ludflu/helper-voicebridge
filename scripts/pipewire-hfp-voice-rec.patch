@@ -9,29 +9,27 @@ diff --git a/spa/plugins/bluez5/backend-native.c b/spa/plugins/bluez5/backend-na
  	unsigned int hfp_hf_3way:1;
  	unsigned int hfp_hf_nrec:1;
  	unsigned int hfp_hf_clcc:1;
-@@ -854,8 +855,29 @@
- 		return;
- 
+@@ -856,6 +857,27 @@
  	rfcomm_send_reply(rfcomm, "+CIEV: 2,%d", rfcomm->cind_call_active);
-+}
-+
+ }
+ 
 +static void rfcomm_hfp_ag_end_voice_recognition(struct rfcomm *rfcomm)
 +{
 +	rfcomm_send_reply(rfcomm, "+BVRA:0");
 +	spa_log_info(rfcomm->backend->log, "RFCOMM voice recognition stopped");
-+		unsigned int voice_recognition_active:1;
++	rfcomm->voice_recognition_active = 0;
 +	if (rfcomm->transport) {
 +		unsigned int i;
 +		for (i = 0; i < 8 && rfcomm->transport->acquire_refcount > 0; i++)
 +			spa_bt_transport_release(rfcomm->transport);
 +	}
- }
- 
++}
++
 +static void rfcomm_hfp_ag_start_voice_recognition(struct rfcomm *rfcomm)
 +{
 +	rfcomm_send_reply(rfcomm, "+BVRA:1");
 +	spa_log_info(rfcomm->backend->log, "RFCOMM voice recognition started");
-+		unsigned int voice_recognition_active:1;
++	rfcomm->voice_recognition_active = 1;
 +	if (rfcomm->transport)
 +		spa_bt_transport_acquire(rfcomm->transport, false);
 +}
@@ -47,26 +45,34 @@ diff --git a/spa/plugins/bluez5/backend-native.c b/spa/plugins/bluez5/backend-na
  		rfcomm_send_reply(rfcomm, "+BRSF: %u", ag_features);
  		rfcomm_send_reply(rfcomm, "OK");
  	} else if (spa_strstartswith(buf, "AT+BAC=")) {
-@@ -1164,7 +1187,18 @@
- 		} else {
+@@ -1165,6 +1188,26 @@
  			spa_log_debug(backend->log, "RFCOMM receive unsupported VGS gain: %s", buf);
  			rfcomm_send_error(rfcomm, CMEE_OPERATION_NOT_ALLOWED);
-+		}
+ 		}
 +	} else if (sscanf(buf, "AT+BVRA=%u", &value) == 1) {
 +		rfcomm_send_reply(rfcomm, "OK");
-+		unsigned int voice_recognition_active:1;
++		if (value == 1 && rfcomm->voice_recognition_active) {
 +			/* Bose QC often re-sends AT+BVRA=1 instead of AT+BVRA=0 on release */
 +			rfcomm_hfp_ag_end_voice_recognition(rfcomm);
 +		} else if (value == 1) {
 +			rfcomm_hfp_ag_start_voice_recognition(rfcomm);
 +		} else {
 +			rfcomm_hfp_ag_end_voice_recognition(rfcomm);
- 		}
++		}
++		return true;
++	} else if (spa_strstartswith(buf, "AT+CHUP")) {
++		/* Bose QC sends hang-up to end voice recognition when there is no call. */
++		if (rfcomm->voice_recognition_active) {
++			rfcomm_send_reply(rfcomm, "OK");
++			rfcomm_hfp_ag_end_voice_recognition(rfcomm);
++			return true;
++		}
++		rfcomm_send_reply(rfcomm, "OK");
 +		return true;
  	} else if (spa_strstartswith(buf, "AT+BIND=?")) {
  		rfcomm_send_reply(rfcomm, "+BIND: (2)");
  		rfcomm_send_reply(rfcomm, "OK");
-@@ -1210,7 +1244,8 @@
+@@ -1210,7 +1253,8 @@
  		}
  		rfcomm_send_reply(rfcomm, "OK");
  	} else if (spa_strstartswith(buf, "AT+APLSIRI?")) {

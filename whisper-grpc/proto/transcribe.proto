@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package whisper.v1;
+
+// Client streams captured mic audio to the Mac.
+message AudioChunk {
+  bytes pcm_s16le = 1;
+  bool end_of_stream = 2;
+}
+
+// Server streams transcript + TTS audio for the Pi to play.
+message SpeechReply {
+  string text = 1;
+  bytes pcm_s16le = 2;
+  uint32 sample_rate = 3;
+  bool end_of_stream = 4;
+}
+
+service WhisperTranscriber {
+  rpc Transcribe(stream AudioChunk) returns (stream SpeechReply);
+}

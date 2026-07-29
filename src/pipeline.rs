@@ -1,7 +1,7 @@
 //! Imperative shell: runs the `Effect`s the core state machine emits.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
@@ -16,6 +16,10 @@ pub struct Config {
     /// PulseAudio/PipeWire source name for the connected headset's mic,
     /// e.g. "bluez_input.XX_XX_XX_XX_XX_XX" -- find with `pactl list sources`.
     pub pulse_source: String,
+    /// Headset speaker sink for TTS, e.g. "bluez_output.XX_XX_XX_XX_XX_XX.1"
+    pub pulse_sink: Option<String>,
+    /// Remote gRPC Whisper service, e.g. `http://192.168.1.10:50051` (Mac on LAN).
+    pub whisper_grpc_addr: Option<String>,
     /// Delay before parecord; 0 when mic source is already RUNNING (pulse backend).
     pub capture_sco_delay_ms: u64,
 }
@@ -108,6 +112,12 @@ pub async fn stop_capture_and_transcribe(cfg: &Config, handle: CaptureHandle) ->
     // Drop the HFP SCO session (QC often omits AT+BVRA=0).
     release_sco_mic(cfg).await;
 
+    // Let the headset sink settle after profile cycle before playback.
+    if cfg.whisper_grpc_addr.is_some() {
+        let delay = Duration::from_millis(env_ms("PLAYBACK_SINK_DELAY_MS", 800));
+        tokio::time::sleep(delay).await;
+    }
+
     match run_whisper(cfg).await {
         Ok(text) => {
             let trimmed = text.trim();
@@ -117,6 +127,9 @@ pub async fn stop_capture_and_transcribe(cfg: &Config, handle: CaptureHandle) ->
             } else {
                 println!("{trimmed}");
                 tracing::info!(transcript = %trimmed, "user said");
+            }
+            if cfg.whisper_grpc_addr.is_none() {
+                say_thank_you(cfg.pulse_sink.as_deref()).await;
             }
             Event::TranscriptReady(text)
         }
@@ -144,16 +157,74 @@ async fn release_sco_mic(cfg: &Config) {
     }
 
     // Suspend only drops the PipeWire node; cycle HFP profile to tear down SCO.
-    if let Some(card) = pulse_card_from_source(&cfg.pulse_source) {
+    let card = pulse_card_for_source(&cfg.pulse_source).await;
+    if let Some(card) = card {
         cycle_hfp_profile(&card).await;
+    } else {
+        tracing::warn!(
+            source = %cfg.pulse_source,
+            "could not resolve Pulse card for profile cycle"
+        );
     }
 }
 
-/// `bluez_input.E4_58_BC_80_90_CD` → `bluez_card.E4_58_BC_80_90_CD`
+/// Resolve card name from `pactl list sources` (handles colon vs underscore MAC forms).
+async fn pulse_card_for_source(source: &str) -> Option<String> {
+    let output = Command::new("pactl")
+        .args(["list", "sources"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return pulse_card_from_source(source);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut name_matches = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("\tName: ") {
+            name_matches = rest == source;
+            continue;
+        }
+        if name_matches {
+            if let Some(card) = line.strip_prefix("\tCard: ") {
+                return Some(card.to_string());
+            }
+            if line.starts_with("Source #") {
+                name_matches = false;
+            }
+        }
+    }
+
+    pulse_card_from_source(source)
+}
+
+/// Fallback: `bluez_input.E4:58:BC:80:90:CD` → `bluez_card.E4_58_BC_80_90_CD`
 fn pulse_card_from_source(source: &str) -> Option<String> {
     source
         .strip_prefix("bluez_input.")
-        .map(|mac| format!("bluez_card.{mac}"))
+        .map(|mac| format!("bluez_card.{}", mac.replace(':', "_")))
+}
+
+/// Fallback: `bluez_input.E4:58:BC:80:90:CD` → `bluez_output.E4_58_BC_80_90_CD.1`
+pub fn pulse_sink_from_source(source: &str) -> Option<String> {
+    source
+        .strip_prefix("bluez_input.")
+        .map(|mac| format!("bluez_output.{}.1", mac.replace(':', "_")))
+}
+
+async fn say_thank_you(sink: Option<&str>) {
+    let phrase = std::env::var("THANK_YOU_PHRASE").unwrap_or_else(|_| "thank you".into());
+    let mut cmd = Command::new("espeak-ng");
+    cmd.args(["-s", "150", &phrase]);
+    if let Some(s) = sink {
+        cmd.env("PULSE_SINK", s);
+    }
+    match cmd.status().await {
+        Ok(s) if s.success() => tracing::info!(phrase = %phrase, "spoken to headset"),
+        Ok(s) => tracing::warn!("espeak-ng exited with {s}"),
+        Err(e) => tracing::warn!("espeak-ng failed: {e}"),
+    }
 }
 
 async fn cycle_hfp_profile(card: &str) {
@@ -188,6 +259,20 @@ async fn run_whisper(cfg: &Config) -> Result<String> {
         _ => {}
     }
 
+    if let Some(addr) = &cfg.whisper_grpc_addr {
+        tracing::info!(%addr, "streaming capture to whisper gRPC");
+        let result = crate::grpc_transcribe::transcribe_and_play(
+            addr,
+            Path::new(CAPTURE_FILE),
+            cfg.pulse_sink.as_deref(),
+        )
+        .await?;
+        if !result.played_response {
+            say_thank_you(cfg.pulse_sink.as_deref()).await;
+        }
+        return Ok(result.text);
+    }
+
     let output = Command::new(&cfg.whisper_binary)
         .args([
             "-m",
@@ -210,4 +295,33 @@ async fn run_whisper(cfg: &Config) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pulse_card_from_source;
+
+    #[test]
+    fn pulse_sink_from_colon_mac() {
+        assert_eq!(
+            super::pulse_sink_from_source("bluez_input.E4:58:BC:80:90:CD"),
+            Some("bluez_output.E4_58_BC_80_90_CD.1".into())
+        );
+    }
+
+    #[test]
+    fn pulse_card_from_colon_mac() {
+        assert_eq!(
+            pulse_card_from_source("bluez_input.E4:58:BC:80:90:CD"),
+            Some("bluez_card.E4_58_BC_80_90_CD".into())
+        );
+    }
+
+    #[test]
+    fn pulse_card_from_underscore_mac() {
+        assert_eq!(
+            pulse_card_from_source("bluez_input.E4_58_BC_80_90_CD"),
+            Some("bluez_card.E4_58_BC_80_90_CD".into())
+        );
+    }
 }

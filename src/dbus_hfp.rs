@@ -7,6 +7,7 @@
 //! in btmon (`48 7c 44 00`). We watch both:
 //!
 //! - `AT+BVRA=1/0` when the stack advertises voice recognition (ideal)
+//! - `AT+CHUP` on release (Bose QC ends voice rec with hang-up, not BVRA=0)
 //! - AVRCP play press/release (what the button sends to the Pi today)
 //!
 //! Backend priority (`HFP_BACKEND=auto`): oFono → btmon → pulse (mic RUNNING).
@@ -310,6 +311,21 @@ fn parse_at_bvra(line: &str) -> Option<Event> {
     None
 }
 
+/// Bose QC ends voice recognition with `AT+CHUP` (hang-up) on button release,
+/// not `AT+BVRA=0`. PipeWire stock handler tries to hang up a call and replies ERROR.
+fn parse_at_chup(line: &str) -> Option<Event> {
+    let upper = line.to_ascii_uppercase();
+    if upper.contains("AT+CHUP") {
+        return Some(Event::RecognitionStopped);
+    }
+
+    let compact = hex_compact(line);
+    if compact.contains("41542b43485550") {
+        return Some(Event::RecognitionStopped);
+    }
+    None
+}
+
 /// AVRCP pass-through **play/pause** (0x44) from the QC multi-function button.
 /// On Linux this is what the button sends when the Pi does not advertise HFP
 /// voice recognition in +BRSF (unlike iPhone).
@@ -330,6 +346,7 @@ fn parse_avrcp_play(line: &str) -> Option<Event> {
 #[derive(Debug, PartialEq, Eq)]
 enum BtmonSignal {
     AtBvra,
+    AtChup,
     AvrcpPlay,
 }
 
@@ -340,6 +357,9 @@ fn avrcp_play_enabled() -> bool {
 fn classify_btmon_line(line: &str) -> Option<(Event, BtmonSignal)> {
     if let Some(ev) = parse_at_bvra(line) {
         return Some((ev, BtmonSignal::AtBvra));
+    }
+    if let Some(ev) = parse_at_chup(line) {
+        return Some((ev, BtmonSignal::AtChup));
     }
     if avrcp_play_enabled() {
         if let Some(ev) = parse_avrcp_play(line) {
@@ -428,6 +448,9 @@ fn spawn_btmon_event_source(tx: tokio::sync::mpsc::Sender<Event>) {
                     BtmonSignal::AtBvra => {
                         tracing::info!(?ev, "btmon HFP AT+BVRA");
                     }
+                    BtmonSignal::AtChup => {
+                        tracing::info!(?ev, "btmon HFP AT+CHUP (Bose QC release)");
+                    }
                     BtmonSignal::AvrcpPlay => {
                         tracing::info!(
                             ?ev,
@@ -511,6 +534,18 @@ mod tests {
         );
         assert_eq!(
             parse_at_bvra("  2b 42 56 52 41 3a 30 0d"),
+            Some(Event::RecognitionStopped)
+        );
+    }
+
+    #[test]
+    fn at_chup_is_release() {
+        assert_eq!(
+            parse_at_chup("        41 54 2b 43 48 55 50 0d e4                       AT+CHUP.."),
+            Some(Event::RecognitionStopped)
+        );
+        assert_eq!(
+            parse_at_chup("      AT+CHUP"),
             Some(Event::RecognitionStopped)
         );
     }

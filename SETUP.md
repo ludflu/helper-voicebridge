@@ -280,8 +280,9 @@ Set by `run.sh` or override before launch:
 | `PULSE_SOURCE` | auto-detected `bluez_input.*` | HFP mic for `parecord` |
 | `PULSE_SERVER` | `unix:/run/user/1000/pulse/native` | User PipeWire socket (required under sudo) |
 | `XDG_RUNTIME_DIR` | `/run/user/1000` | Required for user session services |
-| `WHISPER_BIN` | `/usr/local/bin/whisper-cli` | Whisper binary |
-| `WHISPER_MODEL` | `/opt/whisper/models/ggml-base.en.bin` | GGML model path |
+| `WHISPER_BIN` | `/usr/local/bin/whisper-cli` | Local Whisper (Pi); ignored if `WHISPER_GRPC_ADDR` is set |
+| `WHISPER_MODEL` | `/opt/whisper/models/ggml-base.en.bin` | GGML model path (local Pi whisper only) |
+| `WHISPER_GRPC_ADDR` | _(unset)_ | Remote gRPC service on Mac, e.g. `http://192.168.1.42:50051` |
 | `HEADSET_NAME_HINT` | `quietcomfort` | oFono backend hint (unused when btmon is active) |
 | `HFP_BACKEND` | `auto` | `auto` → btmon on this Pi (`ofono` modem not present) |
 | `BTMON_INTERFACE` | `hci0` | HCI device for btmon |
@@ -290,6 +291,27 @@ Set by `run.sh` or override before launch:
 | `MIN_CAPTURE_MS` | `1500` | Minimum recording length before stop/transcribe |
 | `MAX_CAPTURE_MS` | `30000` | Auto-stop if no end signal |
 | `BT_AVRCP_PLAY` | enabled | Set to `0` to ignore AVRCP play/pause fallback |
+
+### Remote Whisper on Mac (recommended)
+
+Transcription runs on your Mac (`whisper-grpc/`), not on the Pi. The Pi streams
+captured audio over the LAN.
+
+**Mac:**
+
+```bash
+cd whisper-grpc
+make install
+make run    # listens on 0.0.0.0:50051
+```
+
+**Pi** (`run.sh` or env):
+
+```bash
+export WHISPER_GRPC_ADDR=http://192.168.1.42:50051   # Mac LAN IP
+```
+
+See [whisper-grpc/README.md](whisper-grpc/README.md) for model and device options.
 
 ---
 
@@ -334,7 +356,7 @@ strings /usr/lib/aarch64-linux-gnu/spa-0.2/bluez5/libspa-bluez5.so | grep -i "vo
 |-------|------------------|----------------------------|
 | oFono / D-Bus | `VoiceRecognition` property | No `Handsfree` modem — PipeWire owns HFP |
 | Stock PipeWire | `AT+BVRA` handling | Not implemented; `+BRSF` missing voice-rec bit |
-| Bose QC button | `AT+BVRA=1/0` | Sends `AT+BVRA=1` on press; often **no** `AT+BVRA=0` on release |
+| Bose QC button | `AT+BVRA=1/0` | Press: `AT+BVRA=1`; **release: `AT+CHUP`** (not `AT+BVRA=0`) |
 | Stop detection | Mic `SUSPENDED` | Mic stays `RUNNING` until bridge stops parecord, suspends source, and cycles HFP profile |
 | Button stop | Release | **Second press** toggles stop (PipeWire patch + bridge); release alone usually does nothing |
 
