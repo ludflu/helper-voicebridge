@@ -1,3 +1,4 @@
+mod bridge;
 mod core;
 mod dbus_hfp;
 mod grpc_transcribe;
@@ -7,6 +8,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::bridge::{accept_transcript, should_barge_in};
 use crate::core::{transition, Effect, Event, State};
 use crate::pipeline::{CaptureHandle, Config};
 
@@ -68,8 +70,10 @@ async fn main() -> Result<()> {
             }
         };
 
-        if matches!(&incoming, Incoming::Hfp(Event::RecognitionStarted) if state == State::Transcribing)
-        {
+        if matches!(
+            &incoming,
+            Incoming::Hfp(Event::RecognitionStarted) if should_barge_in(&state, &Event::RecognitionStarted)
+        ) {
             transcribe_gen = transcribe_gen.wrapping_add(1);
             grpc_transcribe::abort_playback().await;
             tracing::info!("button pressed during transcription — barge-in");
@@ -78,7 +82,7 @@ async fn main() -> Result<()> {
         let event = match incoming {
             Incoming::Hfp(event) => event,
             Incoming::Transcript(completion) => {
-                if completion.generation != transcribe_gen {
+                if !accept_transcript(completion.generation, transcribe_gen) {
                     tracing::info!("ignoring stale transcription result");
                     continue;
                 }
