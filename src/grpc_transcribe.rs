@@ -21,6 +21,21 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_PLAYBACK_RATE: u32 = 16000;
 const PAPLAY_WARMUP: Duration = Duration::from_millis(400);
 
+/// Stop in-flight TTS playback (barge-in while a prior turn is still playing).
+pub async fn abort_playback() {
+    match Command::new("pkill")
+        .args(["-f", "paplay --format=s16le"])
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {
+            tracing::info!("aborted in-flight paplay");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!("paplay abort skipped: {e}"),
+    }
+}
+
 pub struct GrpcSessionResult {
     pub text: String,
     pub played_response: bool,

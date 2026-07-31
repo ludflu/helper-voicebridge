@@ -1,10 +1,30 @@
 #!/bin/bash
+# Connect Bose QC headset (HFP) and run qc-voice-bridge.
+# Waits indefinitely for the headset when BT_CONNECT_WAIT=1 (default for systemd).
+
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MAC="${BT_MAC:-E4:58:BC:80:90:CD}"
 UID_NUM="$(id -u)"
+BT_CONNECT_WAIT="${BT_CONNECT_WAIT:-1}"
+BT_CONNECT_RETRY_SECS="${BT_CONNECT_RETRY_SECS:-15}"
+BT_CONNECT_ATTEMPTS="${BT_CONNECT_ATTEMPTS:-3}"
 
-connect_headset() {
+wait_for_bluetooth() {
+  while ! bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; do
+    echo "Waiting for Bluetooth adapter..."
+    sleep 3
+  done
+}
+
+wait_for_pulse() {
+  while ! pactl info >/dev/null 2>&1; do
+    echo "Waiting for PipeWire/PulseAudio..."
+    sleep 2
+  done
+}
+
+try_connect_headset() {
   if bluetoothctl info "$MAC" 2>/dev/null | grep -q "Connected: yes"; then
     echo "Headset already connected"
     return 0
@@ -12,8 +32,7 @@ connect_headset() {
 
   echo "Connecting $MAC..."
   local attempt
-  for attempt in 1 2 3; do
-    # Wake the headset: brief scan helps when it was asleep or on another device.
+  for attempt in $(seq 1 "$BT_CONNECT_ATTEMPTS"); do
     if [[ "$attempt" -eq 1 ]]; then
       echo "Scanning for headset (wake it: power on, disconnect from phone)..."
       timeout 10 bluetoothctl scan on >/dev/null 2>&1 || true
@@ -29,13 +48,10 @@ connect_headset() {
       fi
     fi
 
-    echo "Connect attempt $attempt failed, retrying..."
+    echo "Connect attempt $attempt/$BT_CONNECT_ATTEMPTS failed"
     sleep 3
   done
 
-  echo "Could not connect to $MAC (page timeout)." >&2
-  echo "Try: power on the QC, disconnect it from your phone, then run ./run.sh again." >&2
-  echo "Or: bluetoothctl remove $MAC && ~/helper-agent/pair-headset.sh $MAC" >&2
   return 1
 }
 
@@ -64,14 +80,38 @@ wait_for_bluez_audio() {
     sleep 1
   done
   echo "Timed out waiting for bluez PulseAudio endpoints"
-  pactl list sources short
-  pactl list sinks short
+  pactl list sources short || true
+  pactl list sinks short || true
   return 1
 }
 
-connect_headset
-switch_hfp
-wait_for_bluez_audio
+prepare_headset() {
+  wait_for_bluetooth
+  wait_for_pulse
+  try_connect_headset && switch_hfp && wait_for_bluez_audio
+}
+
+wait_for_headset() {
+  echo "Waiting for headset $MAC (BT_CONNECT_RETRY_SECS=${BT_CONNECT_RETRY_SECS})..."
+  while true; do
+    if prepare_headset; then
+      return 0
+    fi
+    echo "Headset not available — retrying in ${BT_CONNECT_RETRY_SECS}s"
+    echo "  (power on QC, disconnect from phone, keep Pi in range)"
+    sleep "$BT_CONNECT_RETRY_SECS"
+  done
+}
+
+if [[ "$BT_CONNECT_WAIT" == "1" ]]; then
+  wait_for_headset
+else
+  prepare_headset || {
+    echo "Could not connect to $MAC." >&2
+    echo "Try: power on the QC, disconnect from your phone, or set BT_CONNECT_WAIT=1." >&2
+    exit 1
+  }
+fi
 
 WHISPER_BIN="${WHISPER_BIN:-/usr/local/bin/whisper-cli}"
 WHISPER_MODEL="${WHISPER_MODEL:-/opt/whisper/models/ggml-base.en.bin}"

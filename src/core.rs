@@ -57,6 +57,8 @@ pub fn transition(state: &State, event: Event) -> (State, Vec<Effect>) {
             (Transcribing, vec![StopCaptureAndTranscribe])
         }
 
+        (Transcribing, Event::RecognitionStarted) => (Listening, vec![StartCapture]),
+
         (Transcribing, Event::TranscriptReady(_)) | (Transcribing, Event::TranscriptFailed) => {
             (Idle, vec![ClearRecognitionFlag])
         }
@@ -100,6 +102,13 @@ mod tests {
         let (s, fx) = transition(&State::Listening, Event::RecognitionStarted);
         assert_eq!(s, State::Transcribing);
         assert_eq!(fx, vec![Effect::StopCaptureAndTranscribe]);
+    }
+
+    #[test]
+    fn barge_in_during_transcribe_starts_new_capture() {
+        let (s, fx) = transition(&State::Transcribing, Event::RecognitionStarted);
+        assert_eq!(s, State::Listening);
+        assert_eq!(fx, vec![Effect::StartCapture]);
     }
 
     #[test]

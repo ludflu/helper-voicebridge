@@ -238,11 +238,32 @@ All live in `~/helper-agent/` on lilhelper:
 
 ### `run.sh` behavior
 
-- Connects `BT_MAC` (default `E4:58:BC:80:90:CD`)
+- Waits for Bluetooth and PipeWire, then connects `BT_MAC` (default `E4:58:BC:80:90:CD`)
+- With `BT_CONNECT_WAIT=1` (default), retries every `BT_CONNECT_RETRY_SECS` until the headset connects
 - Sets card profile to `headset-head-unit` (HFP)
 - Waits for `bluez_input` / `bluez_output` Pulse endpoints
 - Runs the bridge as **root** (for `btmon`) while forwarding the **user**
   PipeWire socket via `PULSE_SERVER=unix:/run/user/1000/pulse/native`
+
+### Start on boot (systemd)
+
+Copy `scripts/qc-voice-bridge.service` and `scripts/install-service.sh` to
+`~/helper-agent/`, then on the Pi:
+
+```bash
+sudo ~/helper-agent/install-service.sh
+journalctl --user -u qc-voice-bridge -f
+```
+
+This enables **user linger** (service runs at boot without login), installs
+passwordless sudo for the bridge binary only, and starts the unit. Until the
+headset connects, logs show `Waiting for headset…` / `Headset not available — retrying`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BT_CONNECT_WAIT` | `1` | Loop until headset connects (`0` = fail fast for manual runs) |
+| `BT_CONNECT_RETRY_SECS` | `15` | Delay between connect attempts |
+| `BT_CONNECT_ATTEMPTS` | `3` | `bluetoothctl connect` tries per round |
 
 ---
 

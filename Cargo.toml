@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 zbus = { version = "4", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "fs", "sync"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"

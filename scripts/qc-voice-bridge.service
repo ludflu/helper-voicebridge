@@ -1,0 +1,26 @@
+[Unit]
+Description=QC Voice Bridge (Bose QuietComfort)
+Documentation=file:///home/jsnavely/helper-agent/
+After=bluetooth.target
+Wants=bluetooth.target
+# PipeWire user session (started with loginctl linger).
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/helper-agent
+StandardOutput=journal
+StandardError=journal
+Environment=BT_CONNECT_WAIT=1
+Environment=BT_CONNECT_RETRY_SECS=15
+Environment=BT_MAC=E4:58:BC:80:90:CD
+Environment=WHISPER_GRPC_ADDR=http://192.168.1.238:50051
+Environment=HFP_BACKEND=auto
+Environment=HEADSET_NAME_HINT=quietcomfort
+ExecStart=%h/helper-agent/run.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

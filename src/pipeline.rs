@@ -10,6 +10,7 @@ use crate::core::Event;
 const CAPTURE_FILE: &str = "/tmp/qc-voice-bridge-capture.wav";
 const MIN_WAV_BYTES: u64 = 1000;
 
+#[derive(Clone)]
 pub struct Config {
     pub whisper_binary: PathBuf,
     pub whisper_model: PathBuf,
