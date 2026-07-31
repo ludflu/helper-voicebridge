@@ -1,6 +1,4 @@
 # Cross-link settings for Raspberry Pi OS 64-bit (aarch64).
-# Override the linker path from the Makefile if yours lives elsewhere:
-#   make rpi CROSS_COMPILE=aarch64-linux-gnu-
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-unknown-linux-gnu-gcc"
+# When cross-compiling from macOS, the Makefile sets
+# CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER — not configured here so
+# native Pi builds use the system linker.
