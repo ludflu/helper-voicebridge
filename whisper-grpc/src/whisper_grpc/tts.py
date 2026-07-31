@@ -17,8 +17,24 @@ def playback_rate() -> int:
     return int(os.getenv("WHISPER_PLAYBACK_RATE", str(DEFAULT_PLAYBACK_RATE)))
 
 
+def agent_reply_phrase(reply: str, *, error: str | None = None) -> str:
+    """Normalize agent text (or errors) before TTS."""
+    custom = os.getenv("RESPONSE_PHRASE")
+    if custom:
+        return custom
+    if error:
+        return "Sorry, I couldn't reach the agent."
+    text = reply.strip()
+    if not text:
+        return "I didn't catch that."
+    max_chars = int(os.getenv("ZEROCLAW_TTS_MAX_CHARS", "800"))
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
 def response_phrase(transcript: str) -> str:
-    """Pick the spoken reply phrase."""
+    """Legacy helper: map transcript to a spoken phrase without an agent."""
     custom = os.getenv("RESPONSE_PHRASE")
     if custom:
         return custom

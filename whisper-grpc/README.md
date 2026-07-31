@@ -20,7 +20,7 @@ headset via `paplay`.
 ### Response flow
 
 1. Pi streams captured audio → Mac transcribes with Whisper
-2. Mac synthesizes a reply (default: **"thank you"**) via `espeak-ng`
+2. Mac sends transcript to **ZeroClaw** (`lilhelper` agent), synthesizes the reply via `say`/`afconvert` (or `espeak-ng`)
 3. Mac streams reply PCM back → Pi plays through `PULSE_SINK` as chunks arrive
 
 ## Mac setup
@@ -44,13 +44,39 @@ First run downloads the model from Hugging Face.
 | `WHISPER_FLASH` | `0` | Set `1` to use Flash Attention 2 (CUDA) |
 | `WHISPER_LANGUAGE` | _(auto)_ | e.g. `en` |
 | `WHISPER_SAMPLE_RATE` | `16000` | Expected input rate |
-| `RESPONSE_PHRASE` | `thank you` | TTS phrase streamed back to the Pi (override env) |
+| `ZEROCLAW_MODE` | `auto` | `auto`, `daemon`, `gateway`/`ws`, `webhook`, or `cli` |
+| `ZEROCLAW_AGENT` | `lilhelper` | Agent alias (`[agents.<alias>]` in zeroclaw config) |
+| `ZEROCLAW_URL` | `http://127.0.0.1:42617` | ZeroClaw gateway base URL |
+| `ZEROCLAW_SOCKET` | `~/.zeroclaw/data/daemon.sock` | Local daemon RPC socket (auto mode, no token) |
+| `ZEROCLAW_TOKEN` | _(none)_ | Gateway bearer token (also `OPENCLAW_GATEWAY_TOKEN`) |
+| `ZEROCLAW_TOKEN_FILE` | _(none)_ | Read bearer token from a file |
+| `ZEROCLAW_SESSION_ID` | `qc-voice` | Stable session id (shows in dashboard) |
+| `ZEROCLAW_SESSION_NAME` | `QC Voice` | Session label in dashboard |
+| `ZEROCLAW_ALLOW_CLI` | `0` | Set `1` to allow `zeroclaw agent` fallback without token |
+| `ZEROCLAW_TTS_MAX_CHARS` | `800` | Truncate long agent replies before TTS |
+| `RESPONSE_PHRASE` | _(agent reply)_ | Override spoken phrase (skips agent output) |
 
 On Apple Silicon, MPS is auto-selected when available:
 
 ```bash
 WHISPER_MODEL=openai/whisper-large-v3 WHISPER_DEVICE=mps make run
 ```
+
+### ZeroClaw
+
+With `zeroclaw daemon` running on the same Mac, whisper-grpc talks to it over the
+local Unix socket — **no bearer token required**. Voice turns show up in the
+dashboard as session **`rpc_qc-voice`** (or whatever `ZEROCLAW_SESSION_ID` you set).
+
+```bash
+zeroclaw daemon    # should already be running
+cd ~/project/lh/whisper-grpc && make run
+```
+
+Startup log should say: `zeroclaw transport: auto → daemon rpc (...)`.
+
+Optional: set `ZEROCLAW_TOKEN` to use gateway WebSocket instead (session shows as
+`qc-voice` under gateway sessions).
 
 Find your Mac's LAN IP (System Settings → Network, or `ipconfig getifaddr en0`).
 

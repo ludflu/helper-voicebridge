@@ -22,7 +22,7 @@ install: proto
 	uv sync
 
 run: install
-	WHISPER_DEVICE=$${WHISPER_DEVICE:-auto} uv run whisper-grpc-server
+	PYTHONUNBUFFERED=1 GRPC_VERBOSITY=ERROR WHISPER_DEVICE=$${WHISPER_DEVICE:-auto} uv run whisper-grpc-server
 
 test: proto
 	uv run pytest
