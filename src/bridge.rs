@@ -1,7 +1,5 @@
 //! Pure helpers for the async event loop (generation tracking, barge-in, stop_pending).
 
-#![allow(dead_code)] // apply_event / LoopState wired in tests; main migration pending
-
 use crate::core::{transition, Effect, Event, State};
 
 /// Whether a button press during transcription should cancel the in-flight turn.
@@ -12,6 +10,15 @@ pub fn should_barge_in(state: &State, event: &Event) -> bool {
 /// Drop transcription completions from an older generation after barge-in.
 pub fn accept_transcript(generation: u64, current_gen: u64) -> bool {
     generation == current_gen
+}
+
+/// Resolve a background transcription completion, if it is still current.
+pub fn incoming_to_event(generation: u64, event: Event, current_gen: u64) -> Option<Event> {
+    if accept_transcript(generation, current_gen) {
+        Some(event)
+    } else {
+        None
+    }
 }
 
 /// Session fields the event loop mutates besides capture handles.
@@ -102,6 +109,15 @@ mod tests {
     fn accept_transcript_matches_generation() {
         assert!(accept_transcript(2, 2));
         assert!(!accept_transcript(1, 2));
+    }
+
+    #[test]
+    fn incoming_to_event_drops_stale() {
+        assert!(incoming_to_event(1, Event::TranscriptReady("x".into()), 2).is_none());
+        assert!(matches!(
+            incoming_to_event(2, Event::TranscriptReady("x".into()), 2),
+            Some(Event::TranscriptReady(_))
+        ));
     }
 
     #[test]

@@ -38,6 +38,27 @@ pub fn env_ms(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+pub fn load_config(pulse_source: &str, backend: &crate::dbus_hfp::HfpBackend) -> Config {
+    let capture_sco_delay_ms = match backend {
+        crate::dbus_hfp::HfpBackend::Pulse { .. } => 0,
+        _ => env_ms("CAPTURE_SCO_DELAY_MS", 400),
+    };
+    Config {
+        whisper_binary: std::env::var("WHISPER_BIN")
+            .unwrap_or_else(|_| "/usr/local/bin/whisper-cli".into())
+            .into(),
+        whisper_model: std::env::var("WHISPER_MODEL")
+            .unwrap_or_else(|_| "/opt/whisper/models/ggml-base.en.bin".into())
+            .into(),
+        pulse_source: pulse_source.to_string(),
+        pulse_sink: std::env::var("PULSE_SINK")
+            .ok()
+            .or_else(|| pulse_sink_from_source(pulse_source)),
+        whisper_grpc_addr: std::env::var("WHISPER_GRPC_ADDR").ok(),
+        capture_sco_delay_ms,
+    }
+}
+
 pub async fn start_capture(cfg: &Config) -> Result<CaptureHandle> {
     // Unsuspend in case the previous session left the source suspended.
     let _ = Command::new("pactl")
