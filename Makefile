@@ -8,6 +8,8 @@
 #   make clean
 #
 # On the Pi itself, `make native` (or plain `cargo build --release`) is enough.
+# Pi native build requires PulseAudio client libs:
+#   sudo apt install libpulse-dev
 # From a Mac, install the cross toolchain once:
 #   brew install messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
 #   rustup target add aarch64-unknown-linux-gnu

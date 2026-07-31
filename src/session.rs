@@ -117,7 +117,7 @@ impl Session {
                         );
                     } else {
                         tracing::info!(
-                            "stop requested before parecord started — will stop once capture begins"
+                            "stop requested before capture started — will stop once capture begins"
                         );
                         self.loop_state = request_stop_before_capture(&self.loop_state);
                     }

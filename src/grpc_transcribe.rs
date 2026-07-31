@@ -1,11 +1,12 @@
 //! Stream captured audio to the Mac gRPC service and play streamed TTS back.
 
 use anyhow::{Context, Result};
-use std::path::Path;
-use std::process::Stdio;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint};
 use tonic::Streaming;
 
@@ -16,45 +17,36 @@ pub mod pb {
 
 use pb::{whisper_transcriber_client::WhisperTranscriberClient, AudioChunk, SpeechReply};
 
-const CHUNK_BYTES: usize = 32 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_PLAYBACK_RATE: u32 = 16000;
-const PAPLAY_WARMUP: Duration = Duration::from_millis(400);
 
-/// Stop in-flight TTS playback (barge-in while a prior turn is still playing).
-pub async fn abort_playback() {
-    match Command::new("pkill")
-        .args(["-f", "paplay --format=s16le"])
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => {
-            tracing::info!("aborted in-flight paplay");
-        }
-        Ok(_) => {}
-        Err(e) => tracing::debug!("paplay abort skipped: {e}"),
-    }
-}
+static PLAYBACK_STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
 pub struct GrpcSessionResult {
     pub text: String,
     pub played_response: bool,
 }
 
-/// Stream capture to Mac, print transcript, play streamed response audio.
-pub async fn transcribe_and_play(
+/// Stop in-flight TTS playback (barge-in while a prior turn is still playing).
+pub async fn abort_playback() {
+    let stop = PLAYBACK_STOP.lock().ok().and_then(|mut g| g.take());
+    if let Some(stop) = stop {
+        stop.store(true, Ordering::Relaxed);
+        tracing::info!("aborted in-flight pulse playback");
+    }
+}
+
+/// Open a live gRPC stream and forward PCM chunks as they arrive from the mic.
+pub async fn transcribe_live(
     grpc_addr: &str,
-    capture_path: &Path,
+    pcm_rx: mpsc::Receiver<Vec<u8>>,
     pulse_sink: Option<&str>,
 ) -> Result<GrpcSessionResult> {
-    let data = tokio::fs::read(capture_path)
-        .await
-        .with_context(|| format!("read capture file {}", capture_path.display()))?;
     let channel = connect(grpc_addr).await?;
     let mut client = WhisperTranscriberClient::new(channel);
     let response = client
-        .transcribe(tonic::Request::new(audio_chunk_stream(data)))
+        .transcribe(tonic::Request::new(live_pcm_stream(pcm_rx)))
         .await
         .context("gRPC Transcribe RPC failed")?
         .into_inner();
@@ -106,30 +98,23 @@ fn collect_speech_replies(replies: &[SpeechReply]) -> (String, Vec<u8>, u32) {
     (transcript, pcm, sample_rate)
 }
 
-/// Split PCM bytes into gRPC upload chunks (last chunk marked end_of_stream).
-fn split_audio_chunks(data: &[u8], chunk_size: usize) -> Vec<(Vec<u8>, bool)> {
-    if data.is_empty() {
-        return vec![(Vec::new(), true)];
-    }
-    let mut out = Vec::new();
-    let mut offset = 0;
-    while offset < data.len() {
-        let end = (offset + chunk_size).min(data.len());
-        let last = end >= data.len();
-        out.push((data[offset..end].to_vec(), last));
-        offset = end;
-    }
-    out
-}
-
-fn audio_chunk_stream(data: Vec<u8>) -> impl tokio_stream::Stream<Item = AudioChunk> {
+fn live_pcm_stream(
+    mut pcm_rx: mpsc::Receiver<Vec<u8>>,
+) -> impl tokio_stream::Stream<Item = AudioChunk> {
     async_stream::stream! {
-        for (pcm, last) in split_audio_chunks(&data, CHUNK_BYTES) {
+        while let Some(chunk) = pcm_rx.recv().await {
+            if chunk.is_empty() {
+                continue;
+            }
             yield AudioChunk {
-                pcm_s16le: pcm,
-                end_of_stream: last,
+                pcm_s16le: chunk,
+                end_of_stream: false,
             };
         }
+        yield AudioChunk {
+            pcm_s16le: Vec::new(),
+            end_of_stream: true,
+        };
     }
 }
 
@@ -167,44 +152,25 @@ async fn play_pcm_buffer(pcm: &[u8], sample_rate: u32, pulse_sink: Option<&str>)
         ?pulse_sink,
         "playing response audio"
     );
-    let mut child = spawn_paplay(pulse_sink, sample_rate).await?;
-    tokio::time::sleep(PAPLAY_WARMUP).await;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(pcm).await?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Ok(mut guard) = PLAYBACK_STOP.lock() {
+        *guard = Some(stop.clone());
     }
-    drop(child.stdin.take());
-    match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-        Ok(status) => {
-            if let Ok(exit) = &status {
-                if !exit.success() {
-                    tracing::warn!("paplay exited with {exit}");
-                }
-            }
-        }
-        Err(_) => {
-            tracing::warn!("paplay did not finish, killing");
-            let _ = child.start_kill();
-        }
+
+    let handle = crate::audio::spawn_playback(pcm.to_vec(), sample_rate, pulse_sink, stop)?;
+    tokio::time::sleep(crate::audio::playback_warmup()).await;
+
+    match tokio::time::timeout(Duration::from_secs(30), handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("playback task failed: {e}"),
+        Err(_) => tracing::warn!("playback did not finish in time"),
+    }
+
+    if let Ok(mut guard) = PLAYBACK_STOP.lock() {
+        guard.take();
     }
     Ok(())
-}
-
-async fn spawn_paplay(sink: Option<&str>, sample_rate: u32) -> Result<tokio::process::Child> {
-    let mut cmd = Command::new("paplay");
-    cmd.args([
-        "--format=s16le",
-        &format!("--rate={sample_rate}"),
-        "--channels=1",
-        "--raw",
-    ]);
-    if let Some(s) = sink {
-        cmd.args(["--device", s]);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn paplay for streamed response")
 }
 
 #[cfg(test)]
@@ -231,19 +197,6 @@ mod tests {
     fn playback_rate_defaults_when_zero() {
         assert_eq!(playback_rate(0), 16_000);
         assert_eq!(playback_rate(22_050), 22_050);
-    }
-
-    #[test]
-    fn split_audio_chunks_empty() {
-        assert_eq!(split_audio_chunks(b"", 4), vec![(Vec::new(), true)]);
-    }
-
-    #[test]
-    fn split_audio_chunks_marks_last() {
-        assert_eq!(
-            split_audio_chunks(b"abcdef", 4),
-            vec![(b"abcd".to_vec(), false), (b"ef".to_vec(), true)]
-        );
     }
 
     #[test]

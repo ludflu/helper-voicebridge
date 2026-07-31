@@ -1,3 +1,4 @@
+mod audio;
 mod bridge;
 mod core;
 mod dbus_hfp;
