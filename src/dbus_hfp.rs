@@ -32,9 +32,7 @@ pub enum HfpBackend {
         modem_path: OwnedObjectPath,
     },
     /// Mic source goes RUNNING when HFP SCO is open (hold-to-talk ground truth).
-    Pulse {
-        source: String,
-    },
+    Pulse { source: String },
     /// Parse btmon for AT+BVRA and AVRCP play/pause (QC button on Linux).
     Btmon,
 }
@@ -83,18 +81,14 @@ pub async fn open_backend(name_hint: &str, pulse_source: &str) -> Result<HfpBack
             }
         }
         if prefer == "ofono" {
-            anyhow::bail!(
-                "HFP_BACKEND=ofono but no org.ofono.Handsfree modem found"
-            );
+            anyhow::bail!("HFP_BACKEND=ofono but no org.ofono.Handsfree modem found");
         }
         tracing::warn!("oFono Handsfree modem not found");
     }
 
     if try_btmon {
         if btmon_available().await {
-            tracing::info!(
-                "using btmon backend (AT+BVRA + AVRCP play/pause 0x44 for QC button)"
-            );
+            tracing::info!("using btmon backend (AT+BVRA + AVRCP play/pause 0x44 for QC button)");
             return Ok(HfpBackend::Btmon);
         }
         if prefer == "btmon" {
@@ -128,9 +122,9 @@ async fn pulse_source_available(source: &str) -> bool {
         .output()
         .await;
     match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(source))
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.contains(source)),
         _ => false,
     }
 }
@@ -150,15 +144,14 @@ async fn find_headset_modem(conn: &Connection, name_hint: &str) -> Result<OwnedO
                 .map(|n| n.to_lowercase().contains(&name_hint.to_lowercase()))
                 .unwrap_or(false);
 
-        if looks_like_name_match {
-            if HandsfreeProxy::builder(conn)
+        if looks_like_name_match
+            && HandsfreeProxy::builder(conn)
                 .path(path.clone())?
                 .build()
                 .await
                 .is_ok()
-            {
-                return Ok(path);
-            }
+        {
+            return Ok(path);
         }
     }
 
@@ -265,9 +258,10 @@ async fn recognition_events_pulse(
         let _ = child.wait().await;
     });
 
-    Ok(futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|ev| (ev, rx))
-    })
+    Ok(futures_util::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
     .boxed())
 }
 
@@ -410,9 +404,10 @@ async fn recognition_events_btmon(
     spawn_btmon_event_source(tx.clone());
     spawn_pulse_mic_stop_source(pulse_source, tx);
 
-    Ok(futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|ev| (ev, rx))
-    })
+    Ok(futures_util::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
+    )
     .boxed())
 }
 

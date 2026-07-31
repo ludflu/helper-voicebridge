@@ -1,5 +1,7 @@
 //! Pure helpers for the async event loop (generation tracking, barge-in, stop_pending).
 
+#![allow(dead_code)] // apply_event / LoopState wired in tests; main migration pending
+
 use crate::core::{transition, Effect, Event, State};
 
 /// Whether a button press during transcription should cancel the in-flight turn.
@@ -86,7 +88,10 @@ mod tests {
             &State::Transcribing,
             &Event::RecognitionStarted
         ));
-        assert!(!should_barge_in(&State::Listening, &Event::RecognitionStarted));
+        assert!(!should_barge_in(
+            &State::Listening,
+            &Event::RecognitionStarted
+        ));
         assert!(!should_barge_in(
             &State::Transcribing,
             &Event::RecognitionStopped
@@ -148,8 +153,7 @@ mod tests {
             stop_pending: false,
             transcribe_gen: 1,
         };
-        let (next, actions) =
-            apply_event(&state, Event::TranscriptReady("hello".into()));
+        let (next, actions) = apply_event(&state, Event::TranscriptReady("hello".into()));
         assert_eq!(next.core, State::Idle);
         assert_eq!(actions, vec![LoopAction::ClearRecognitionFlag]);
     }

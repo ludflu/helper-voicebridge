@@ -1,0 +1,18 @@
+# Complexity thresholds (see https://doc.rust-lang.org/clippy/lint_configuration.html)
+
+# Rough branching score per function. Not true Sonar cognitive complexity — use
+# as a proxy only. Clippy maintainers recommend too_many_lines / excessive_nesting
+# alongside this lint.
+cognitive-complexity-threshold = 25
+
+# Function body length (statements/expressions, not physical lines).
+too-many-lines-threshold = 100
+
+# Max nesting depth (if/loop/match blocks).
+excessive-nesting-threshold = 6
+
+# Arguments per function.
+too-many-arguments-threshold = 7
+
+# Type expression size (generics, tuples, etc.).
+type-complexity-threshold = 250

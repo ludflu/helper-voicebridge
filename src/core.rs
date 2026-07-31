@@ -49,13 +49,9 @@ pub fn transition(state: &State, event: Event) -> (State, Vec<Effect>) {
 
         // Bose QC opens SCO with AT+BVRA=1 but often omits AT+BVRA=0 on release;
         // a second button press while recording sends another start — treat as stop.
-        (Listening, Event::RecognitionStarted) => {
-            (Transcribing, vec![StopCaptureAndTranscribe])
-        }
+        (Listening, Event::RecognitionStarted) => (Transcribing, vec![StopCaptureAndTranscribe]),
 
-        (Listening, Event::RecognitionStopped) => {
-            (Transcribing, vec![StopCaptureAndTranscribe])
-        }
+        (Listening, Event::RecognitionStopped) => (Transcribing, vec![StopCaptureAndTranscribe]),
 
         (Transcribing, Event::RecognitionStarted) => (Listening, vec![StartCapture]),
 
@@ -82,10 +78,7 @@ mod tests {
         assert_eq!(s, State::Transcribing);
         assert_eq!(fx, vec![Effect::StopCaptureAndTranscribe]);
 
-        let (s, fx) = transition(
-            &s,
-            Event::TranscriptReady("what's the weather".into()),
-        );
+        let (s, fx) = transition(&s, Event::TranscriptReady("what's the weather".into()));
         assert_eq!(s, State::Idle);
         assert_eq!(fx, vec![Effect::ClearRecognitionFlag]);
     }

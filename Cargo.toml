@@ -18,3 +18,18 @@ async-stream = "0.3"
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Complexity / size (see clippy.toml for thresholds)
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+excessive_nesting = "allow"
+too_many_arguments = "warn"
+type_complexity = "warn"
+# Hygiene
+collapsible_if = "warn"
+items_after_test_module = "warn"
+module_inception = "warn"

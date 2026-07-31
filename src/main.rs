@@ -18,30 +18,11 @@ async fn main() -> Result<()> {
 
     let pulse_source = std::env::var("PULSE_SOURCE")
         .context_or("PULSE_SOURCE env var not set (see `pactl list sources`)")?;
-
     let name_hint = std::env::var("HEADSET_NAME_HINT").unwrap_or_default();
     let backend = dbus_hfp::open_backend(&name_hint, &pulse_source).await?;
     tracing::info!(?backend, "HFP backend ready");
 
-    let capture_sco_delay_ms = match &backend {
-        dbus_hfp::HfpBackend::Pulse { .. } => 0,
-        _ => pipeline::env_ms("CAPTURE_SCO_DELAY_MS", 400),
-    };
-
-    let cfg = Config {
-        whisper_binary: std::env::var("WHISPER_BIN")
-            .unwrap_or_else(|_| "/usr/local/bin/whisper-cli".into())
-            .into(),
-        whisper_model: std::env::var("WHISPER_MODEL")
-            .unwrap_or_else(|_| "/opt/whisper/models/ggml-base.en.bin".into())
-            .into(),
-        pulse_source: pulse_source.clone(),
-        pulse_sink: std::env::var("PULSE_SINK")
-            .ok()
-            .or_else(|| pipeline::pulse_sink_from_source(&pulse_source)),
-        whisper_grpc_addr: std::env::var("WHISPER_GRPC_ADDR").ok(),
-        capture_sco_delay_ms,
-    };
+    let cfg = load_config(&pulse_source, &backend);
 
     let mut hfp_events = dbus_hfp::recognition_events(&backend, &cfg.pulse_source).await?;
     let (transcript_tx, mut transcript_rx) = mpsc::channel::<TranscriptCompletion>(4);
@@ -127,6 +108,27 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_config(pulse_source: &str, backend: &dbus_hfp::HfpBackend) -> Config {
+    let capture_sco_delay_ms = match backend {
+        dbus_hfp::HfpBackend::Pulse { .. } => 0,
+        _ => pipeline::env_ms("CAPTURE_SCO_DELAY_MS", 400),
+    };
+    Config {
+        whisper_binary: std::env::var("WHISPER_BIN")
+            .unwrap_or_else(|_| "/usr/local/bin/whisper-cli".into())
+            .into(),
+        whisper_model: std::env::var("WHISPER_MODEL")
+            .unwrap_or_else(|_| "/opt/whisper/models/ggml-base.en.bin".into())
+            .into(),
+        pulse_source: pulse_source.to_string(),
+        pulse_sink: std::env::var("PULSE_SINK")
+            .ok()
+            .or_else(|| pipeline::pulse_sink_from_source(pulse_source)),
+        whisper_grpc_addr: std::env::var("WHISPER_GRPC_ADDR").ok(),
+        capture_sco_delay_ms,
+    }
 }
 
 struct TranscriptCompletion {

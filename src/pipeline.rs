@@ -289,11 +289,7 @@ async fn run_whisper(cfg: &Config) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "whisper exited with {}: {}",
-            output.status,
-            stderr.trim()
-        );
+        anyhow::bail!("whisper exited with {}: {}", output.status, stderr.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

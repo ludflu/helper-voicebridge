@@ -32,7 +32,7 @@ endif
 RPI_BIN    := target/$(RPI_TARGET)/release/$(CRATE)
 NATIVE_BIN := target/release/$(CRATE)
 
-.PHONY: all rpi native test clean check-toolchain
+.PHONY: all rpi native test lint fmt fmt-check clean check-toolchain
 
 all: rpi
 
@@ -50,6 +50,16 @@ native:
 
 test:
 	cargo test
+
+lint:
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+
+fmt:
+	cargo fmt
+
+fmt-check:
+	cargo fmt --check
 
 clean:
 	cargo clean

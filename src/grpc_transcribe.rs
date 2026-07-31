@@ -10,6 +10,7 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::Streaming;
 
 pub mod pb {
+    #![allow(clippy::all)] // tonic-generated service stubs
     tonic::include_proto!("whisper.v1");
 }
 
@@ -87,9 +88,7 @@ fn playback_rate(sample_rate: u32) -> u32 {
 }
 
 /// Merge streamed reply chunks into transcript text, PCM, and sample rate.
-fn collect_speech_replies(
-    replies: &[SpeechReply],
-) -> (String, Vec<u8>, u32) {
+fn collect_speech_replies(replies: &[SpeechReply]) -> (String, Vec<u8>, u32) {
     let mut transcript = String::new();
     let mut pcm = Vec::new();
     let mut sample_rate = DEFAULT_PLAYBACK_RATE;
@@ -161,11 +160,7 @@ async fn play_response_stream(
     })
 }
 
-async fn play_pcm_buffer(
-    pcm: &[u8],
-    sample_rate: u32,
-    pulse_sink: Option<&str>,
-) -> Result<()> {
+async fn play_pcm_buffer(pcm: &[u8], sample_rate: u32, pulse_sink: Option<&str>) -> Result<()> {
     tracing::info!(
         bytes = pcm.len(),
         sample_rate,
@@ -192,6 +187,24 @@ async fn play_pcm_buffer(
         }
     }
     Ok(())
+}
+
+async fn spawn_paplay(sink: Option<&str>, sample_rate: u32) -> Result<tokio::process::Child> {
+    let mut cmd = Command::new("paplay");
+    cmd.args([
+        "--format=s16le",
+        &format!("--rate={sample_rate}"),
+        "--channels=1",
+        "--raw",
+    ]);
+    if let Some(s) = sink {
+        cmd.args(["--device", s]);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn paplay for streamed response")
 }
 
 #[cfg(test)]
@@ -254,22 +267,4 @@ mod tests {
         assert_eq!(pcm, vec![1, 2, 3, 4]);
         assert_eq!(rate, 16_000);
     }
-}
-
-async fn spawn_paplay(sink: Option<&str>, sample_rate: u32) -> Result<tokio::process::Child> {
-    let mut cmd = Command::new("paplay");
-    cmd.args([
-        "--format=s16le",
-        &format!("--rate={sample_rate}"),
-        "--channels=1",
-        "--raw",
-    ]);
-    if let Some(s) = sink {
-        cmd.args(["--device", s]);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn paplay for streamed response")
 }
