@@ -1,0 +1,8 @@
+target/
+.git/
+**/*.swp
+.DS_Store
+whisper-grpc/.venv
+whisper-grpc/**/__pycache__
+whisper-grpc/**/*.pyc
+agent-tools/

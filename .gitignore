@@ -19,6 +19,11 @@ rustc-ice-*.txt
 # Debian arm64 libs for macOS cross-compiles (scripts/setup-cross-sysroot.sh)
 cross-sysroot/
 
+# macOS copy metadata (common on exFAT/USB volumes)
+._*
+.DS_Store
+__MACOSX/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

@@ -1,0 +1,21 @@
+# Native aarch64 Linux build for Raspberry Pi (linux/arm64).
+# Apple Silicon Mac: Docker runs linux/arm64 natively (same as Pi).
+# Intel Mac: run `make docker-setup` once (installs QEMU via binfmt).
+#
+# syntax=docker/dockerfile:1
+
+FROM rust:1-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpulse-dev libpipewire-0.3-dev libspa-0.2-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY whisper-grpc/proto ./whisper-grpc/proto
+
+RUN cargo build --release
+
+FROM scratch AS export
+COPY --from=build /src/target/release/qc-voice-bridge /qc-voice-bridge

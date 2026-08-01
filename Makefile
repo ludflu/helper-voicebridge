@@ -47,6 +47,7 @@ CROSS_ENV = \
 	PKG_CONFIG_ALLOW_CROSS=1 \
 	PKG_CONFIG_SYSROOT_DIR=$(CROSS_SYSROOT) \
 	PKG_CONFIG_PATH=$(CROSS_SYSROOT)/usr/lib/aarch64-linux-gnu/pkgconfig:$(CROSS_SYSROOT)/usr/share/pkgconfig \
+	BINDGEN_EXTRA_CLANG_ARGS='--sysroot=$(CROSS_SYSROOT) -I$(CROSS_SYSROOT)/usr/include/aarch64-linux-gnu' \
 	RUSTFLAGS='-C link-arg=--sysroot=$(CROSS_SYSROOT) -C link-arg=-B$(CROSS_SYSROOT)/usr/lib/aarch64-linux-gnu -C link-arg=-L$(CROSS_SYSROOT)/lib/aarch64-linux-gnu -C link-arg=-Wl,-rpath-link,$(CROSS_SYSROOT)/lib/aarch64-linux-gnu -C link-arg=-Wl,-rpath-link,$(CROSS_SYSROOT)/usr/lib/aarch64-linux-gnu -C link-arg=-Wl,-rpath-link,$(CROSS_SYSROOT)/usr/lib/aarch64-linux-gnu/pulseaudio -C link-arg=-Wl,--allow-shlib-undefined'
 
 .PHONY: all rpi rpi-docker rpi-host cross-sysroot docker-setup native test lint fmt fmt-check clean check-toolchain deploy
