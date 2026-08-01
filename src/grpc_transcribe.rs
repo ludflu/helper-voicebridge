@@ -22,6 +22,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_PLAYBACK_RATE: u32 = 16000;
 
 static PLAYBACK_STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+static GRPC_CHANNEL: Mutex<Option<(String, Channel)>> = Mutex::new(None);
 
 pub struct GrpcSessionResult {
     pub text: String,
@@ -37,8 +38,57 @@ pub async fn abort_playback() {
     }
 }
 
+/// Upload a complete PCM buffer (used after capture stops).
+pub async fn transcribe_pcm(
+    grpc_addr: &str,
+    pcm: Vec<u8>,
+    pulse_sink: Option<&str>,
+) -> Result<GrpcSessionResult> {
+    let channel = connect(grpc_addr).await?;
+    let mut client = WhisperTranscriberClient::new(channel);
+    let response = client
+        .transcribe(tonic::Request::new(pcm_chunk_stream(pcm)))
+        .await
+        .context("gRPC Transcribe RPC failed")?
+        .into_inner();
+    play_response_stream(response, pulse_sink).await
+}
+
+fn pcm_chunk_stream(pcm: Vec<u8>) -> impl tokio_stream::Stream<Item = AudioChunk> {
+    const CHUNK: usize = 3200;
+    async_stream::stream! {
+        for chunk in pcm.chunks(CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            yield AudioChunk {
+                pcm_s16le: chunk.to_vec(),
+                end_of_stream: false,
+            };
+        }
+        yield AudioChunk {
+            pcm_s16le: Vec::new(),
+            end_of_stream: true,
+        };
+    }
+}
+
 /// Open a live gRPC stream and forward PCM chunks as they arrive from the mic.
 pub async fn transcribe_live(
+    grpc_addr: &str,
+    pcm_rx: mpsc::Receiver<Vec<u8>>,
+    pulse_sink: Option<&str>,
+) -> Result<GrpcSessionResult> {
+    match transcribe_live_once(grpc_addr, pcm_rx, pulse_sink).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            invalidate_channel(grpc_addr);
+            Err(e)
+        }
+    }
+}
+
+async fn transcribe_live_once(
     grpc_addr: &str,
     pcm_rx: mpsc::Receiver<Vec<u8>>,
     pulse_sink: Option<&str>,
@@ -53,14 +103,44 @@ pub async fn transcribe_live(
     play_response_stream(response, pulse_sink).await
 }
 
+fn invalidate_channel(addr: &str) {
+    let uri = normalize_grpc_uri(addr);
+    if let Ok(mut guard) = GRPC_CHANNEL.lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|(cached_uri, _)| cached_uri == &uri)
+        {
+            guard.take();
+        }
+    }
+}
+
 async fn connect(addr: &str) -> Result<Channel> {
     let uri = normalize_grpc_uri(addr);
-    Endpoint::from_shared(uri)?
+    if let Ok(guard) = GRPC_CHANNEL.lock() {
+        if let Some((cached_uri, channel)) = guard.as_ref() {
+            if cached_uri == &uri {
+                return Ok(channel.clone());
+            }
+        }
+    }
+
+    let channel = Endpoint::from_shared(uri.clone())?
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .connect()
         .await
-        .context("connect to whisper gRPC service")
+        .context("connect to whisper gRPC service")?;
+
+    if let Ok(mut guard) = GRPC_CHANNEL.lock() {
+        *guard = Some((uri, channel.clone()));
+    }
+    Ok(channel)
+}
+
+/// Pre-connect so the first button press does not pay TCP/TLS setup latency.
+pub async fn warm_connect(addr: &str) -> Result<()> {
+    connect(addr).await.map(|_| ())
 }
 
 fn normalize_grpc_uri(addr: &str) -> String {
@@ -102,15 +182,18 @@ fn live_pcm_stream(
     mut pcm_rx: mpsc::Receiver<Vec<u8>>,
 ) -> impl tokio_stream::Stream<Item = AudioChunk> {
     async_stream::stream! {
+        let mut total_bytes = 0usize;
         while let Some(chunk) = pcm_rx.recv().await {
             if chunk.is_empty() {
                 continue;
             }
+            total_bytes += chunk.len();
             yield AudioChunk {
                 pcm_s16le: chunk,
                 end_of_stream: false,
             };
         }
+        eprintln!("gRPC stream finished: {total_bytes} bytes sent to whisper");
         yield AudioChunk {
             pcm_s16le: Vec::new(),
             end_of_stream: true,

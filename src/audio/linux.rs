@@ -1,132 +1,108 @@
 use anyhow::{Context, Result};
 use libpulse_binding as pulse;
-use libpulse_binding::context::{Context, FlagSet as ContextFlagSet};
-use libpulse_binding::mainloop::standard::Mainloop;
 use libpulse_simple_binding as psimple;
 use pulse::sample::{Format, Spec};
 use pulse::stream::Direction;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::process::Stdio;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 
 const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u8 = 1;
-/// ~100 ms of mono s16le @ 16 kHz.
-const READ_BYTES: usize = (SAMPLE_RATE as usize * 2 * CHANNELS as usize) / 10;
+/// ~20 ms of mono s16le @ 16 kHz.
+const READ_BYTES: usize = (SAMPLE_RATE as usize * 2 * CHANNELS as usize) / 50;
 
 pub fn playback_warmup() -> Duration {
     Duration::from_millis(400)
 }
 
 pub fn unsuspend_source(source: &str) -> Result<()> {
-    set_source_suspended(source, false).context("unsuspend pulse source")
+    std::process::Command::new("pactl")
+        .args(["suspend-source", source, "0"])
+        .status()
+        .context("pactl unsuspend source")?;
+    Ok(())
 }
 
-fn set_source_suspended(source_name: &str, suspend: bool) -> Result<()> {
-    let mainloop = Rc::new(RefCell::new(
-        Mainloop::new().context("create pulse mainloop")?,
-    ));
-    let context = Rc::new(RefCell::new(
-        Context::new(&mainloop, "qc-voice-bridge").context("create pulse context")?,
-    ));
-    let result = Rc::new(RefCell::new(None::<Result<()>>));
-
-    {
-        let ctx = context.clone();
-        let result_cb = result.clone();
-        let name = source_name.to_string();
-        context
-            .borrow_mut()
-            .set_state_callback(Some(Box::new(move || {
-                let state = ctx.borrow().get_state();
-                if !state.1.is_empty() {
-                    return;
-                }
-                match state.0 {
-                    pulse::context::State::Ready => {
-                        let result_op = result_cb.clone();
-                        let mut context = ctx.borrow_mut();
-                        if let Err(e) = context.suspend_source_by_name(&name, suspend, move |_| {
-                            *result_op.borrow_mut() = Some(Ok(()))
-                        }) {
-                            *result_cb.borrow_mut() =
-                                Some(Err(anyhow::anyhow!("suspend_source_by_name failed: {e}")));
-                        }
-                    }
-                    pulse::context::State::Failed | pulse::context::State::Terminated => {
-                        *result_cb.borrow_mut() =
-                            Some(Err(anyhow::anyhow!("pulse context failed to connect")));
-                    }
-                    _ => {}
-                }
-            })));
-    }
-
-    context
-        .borrow_mut()
-        .connect(None, ContextFlagSet::NOFLAGS, None)
-        .context("connect pulse context")?;
-
-    while result.borrow().is_none() {
-        mainloop
-            .borrow_mut()
-            .iterate(true)
-            .context("pulse mainloop iterate")?;
-    }
-
-    result
-        .borrow_mut()
-        .take()
-        .unwrap_or_else(|| Err(anyhow::anyhow!("pulse suspend never completed")))
-}
-
+/// Live PCM via `parecord --raw` (triggers SCO reliably on PipeWire/BlueZ).
 pub fn spawn_recorder(
     source: &str,
     chunk_tx: mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let source = source.to_string();
-    Ok(tokio::task::spawn_blocking(move || {
-        if let Err(e) = record_loop(&source, chunk_tx, stop) {
-            tracing::warn!("pulse recorder exited: {e:#}");
+    Ok(tokio::spawn(async move {
+        if let Err(e) = parecord_loop(&source, chunk_tx, stop).await {
+            eprintln!("parecord capture failed: {e:#}");
         }
     }))
 }
 
-fn record_loop(source: &str, chunk_tx: mpsc::Sender<Vec<u8>>, stop: Arc<AtomicBool>) -> Result<()> {
-    let spec = pcm_spec();
-    let simple = psimple::Simple::new(
-        None,
-        "qc-voice-bridge",
-        Direction::Record,
-        Some(source),
-        "voice capture",
-        &spec,
-        None,
-        None,
-    )
-    .map_err(|e| anyhow::anyhow!("open pulse record stream on {source}: {e}"))?;
+async fn parecord_loop(
+    source: &str,
+    chunk_tx: mpsc::Sender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
+    let mut cmd = Command::new("parecord");
+    cmd.args([
+        "-d",
+        source,
+        "--format=s16le",
+        "--rate",
+        "16000",
+        "--channels=1",
+        "--raw",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
 
-    tracing::info!(source, "pulse recorder open (live PCM, no file)");
+    if let Ok(ps) = std::env::var("PULSE_SERVER") {
+        cmd.env("PULSE_SERVER", ps);
+    }
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        cmd.env("XDG_RUNTIME_DIR", xdg);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn parecord on {source}"))?;
+
+    eprintln!("parecord started on {source}");
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("parecord stdout unavailable")?;
 
     let mut buf = vec![0u8; READ_BYTES];
+    let mut total = 0u64;
     while !stop.load(Ordering::Relaxed) {
-        simple
-            .read(&mut buf)
-            .map_err(|e| anyhow::anyhow!("pulse read failed: {e}"))?;
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        if chunk_tx.blocking_send(buf.clone()).is_err() {
-            tracing::debug!("pcm consumer dropped");
+        let n = match tokio::time::timeout(Duration::from_millis(250), stdout.read(&mut buf)).await
+        {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => anyhow::bail!("parecord read: {e}"),
+            Err(_) => continue,
+        };
+        total += n as u64;
+        if chunk_tx.send(buf[..n].to_vec()).await.is_err() {
             break;
         }
     }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = child.kill().await;
+    let status = child.wait().await.context("parecord wait")?;
+    if !status.success() {
+        eprintln!("parecord exited with {status}");
+    }
+    eprintln!("parecord captured {total} bytes");
     Ok(())
 }
 
@@ -151,7 +127,7 @@ fn play_loop(
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     let spec = Spec {
-        format: Format::S16LE,
+        format: Format::S16NE,
         channels: CHANNELS,
         rate: sample_rate,
     };
@@ -189,12 +165,4 @@ fn play_loop(
             .map_err(|e| anyhow::anyhow!("pulse drain failed: {e}"))?;
     }
     Ok(())
-}
-
-fn pcm_spec() -> Spec {
-    Spec {
-        format: Format::S16LE,
-        channels: CHANNELS,
-        rate: SAMPLE_RATE,
-    }
 }

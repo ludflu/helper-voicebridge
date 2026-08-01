@@ -2,7 +2,12 @@ PROTO_DIR := proto
 GEN_DIR := src/whisper_grpc
 PROTO_FILE := $(PROTO_DIR)/transcribe.proto
 
-.PHONY: all proto install run test lint fmt clean
+# Keep .venv on APFS — exFAT (external drives) sprinkles AppleDouble `._*` files
+# that break transformers' import scanner (UnicodeDecodeError on `make run`).
+VENV_DIR ?= $(HOME)/.local/venvs/whisper-grpc
+export UV_PROJECT_ENVIRONMENT := $(VENV_DIR)
+
+.PHONY: all proto install run test lint fmt clean venv-clean
 
 all: proto
 
@@ -19,10 +24,14 @@ proto:
 		$(GEN_DIR)/transcribe_pb2_grpc.py
 
 install: proto
+	@rm -rf .venv
 	uv sync
 
 run: install
 	PYTHONUNBUFFERED=1 GRPC_VERBOSITY=ERROR WHISPER_DEVICE=$${WHISPER_DEVICE:-auto} uv run whisper-grpc-server
+
+check-import: install
+	uv run python -c "from whisper_grpc.server import main; print('import ok')"
 
 test: proto
 	uv run pytest
@@ -35,3 +44,6 @@ fmt:
 
 clean:
 	rm -f $(GEN_DIR)/transcribe_pb2.py $(GEN_DIR)/transcribe_pb2_grpc.py
+
+venv-clean:
+	rm -rf .venv $(VENV_DIR)

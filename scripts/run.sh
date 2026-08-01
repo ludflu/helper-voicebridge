@@ -126,7 +126,9 @@ echo "PULSE_SINK=$PULSE_SINK"
 echo "HFP_BACKEND=$HFP_BACKEND"
 echo "WHISPER_GRPC_ADDR=$WHISPER_GRPC_ADDR"
 
-exec sudo -E env \
+# Bridge stderr (sudo child) does not reach systemd; tee to a log file.
+LOG_FILE="${DIR}/bridge.log"
+sudo -E env \
   "PULSE_SOURCE=$PULSE_SOURCE" \
   "PULSE_SINK=$PULSE_SINK" \
   "PULSE_SERVER=$PULSE_SERVER" \
@@ -137,4 +139,5 @@ exec sudo -E env \
   "HEADSET_NAME_HINT=$HEADSET_NAME_HINT" \
   "HFP_BACKEND=$HFP_BACKEND" \
   "BTMON_INTERFACE=${BTMON_INTERFACE:-hci0}" \
-  "$DIR/qc-voice-bridge"
+  "$DIR/qc-voice-bridge" 2>&1 | tee -a "$LOG_FILE"
+exit "${PIPESTATUS[0]:-1}"

@@ -33,6 +33,11 @@ class WhisperServicer(transcribe_pb2_grpc.WhisperTranscriberServicer):
         print("transcribe request started", flush=True)
         pcm = await _collect_pcm(request_iterator)
         print(f"received {len(pcm)} bytes audio", flush=True)
+        if not pcm:
+            print("transcript: (empty — no audio received)", flush=True)
+            yield transcribe_pb2.SpeechReply(text="", sample_rate=self._sample_rate)
+            yield transcribe_pb2.SpeechReply(end_of_stream=True)
+            return
         text = await _run_transcribe(self._engine, pcm, self._sample_rate)
         print(f"transcript: {text}", flush=True)
         phrase = await _agent_reply(text)

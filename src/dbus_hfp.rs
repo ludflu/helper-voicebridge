@@ -386,9 +386,12 @@ fn cancel_capture_watchdog() {
 }
 
 async fn emit_bt_event(tx: &tokio::sync::mpsc::Sender<Event>, ev: Event) -> Result<(), ()> {
-    match ev {
+    match &ev {
         Event::RecognitionStarted => schedule_capture_watchdog(tx.clone()),
-        Event::RecognitionStopped => cancel_capture_watchdog(),
+        Event::RecognitionStopped => {
+            cancel_capture_watchdog();
+            eprintln!("headset signal: stop");
+        }
         _ => {}
     }
     tx.send(ev).await.map_err(|_| ())
@@ -413,6 +416,15 @@ async fn recognition_events_btmon(
 
 fn spawn_btmon_event_source(tx: tokio::sync::mpsc::Sender<Event>) {
     tokio::spawn(async move {
+        // Orphan btmon processes survive service restarts and duplicate button events.
+        let _ = Command::new("pkill")
+            .args(["-x", "btmon"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         let iface = std::env::var("BTMON_INTERFACE").unwrap_or_else(|_| "hci0".into());
         let mut child = match Command::new("btmon")
             .args(["-i", &iface])

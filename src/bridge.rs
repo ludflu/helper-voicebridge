@@ -77,6 +77,20 @@ pub fn request_stop_before_capture(state: &LoopState) -> LoopState {
     next
 }
 
+/// After TTS playback the QC AVRCP toggle often sends **pause** (0xc4) on the next
+/// press while we are idle; core treats that as `RecognitionStopped`, which is a no-op
+/// in `Idle`. Remap to `RecognitionStarted` for the btmon backend only.
+pub fn remap_headset_button(use_btmon: bool, state: &State, event: Event) -> Event {
+    if use_btmon
+        && *state == State::Idle
+        && event == Event::RecognitionStopped
+    {
+        Event::RecognitionStarted
+    } else {
+        event
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +192,21 @@ mod tests {
     fn request_stop_before_capture_sets_flag() {
         let next = request_stop_before_capture(&idle());
         assert!(next.stop_pending);
+    }
+
+    #[test]
+    fn remap_idle_avrcp_pause_to_start_for_btmon() {
+        assert_eq!(
+            remap_headset_button(true, &State::Idle, Event::RecognitionStopped),
+            Event::RecognitionStarted
+        );
+        assert_eq!(
+            remap_headset_button(false, &State::Idle, Event::RecognitionStopped),
+            Event::RecognitionStopped
+        );
+        assert_eq!(
+            remap_headset_button(true, &State::Listening, Event::RecognitionStopped),
+            Event::RecognitionStopped
+        );
     }
 }

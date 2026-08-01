@@ -2,13 +2,9 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
 
 use crate::core::Event;
 
@@ -30,20 +26,13 @@ pub struct Config {
 }
 
 enum CaptureBackend {
-    /// PCM is streamed to whisper-grpc as it is captured.
-    LiveGrpc { result_rx: oneshot::Receiver<Event> },
-    /// PCM is buffered in memory for local whisper-cli (no gRPC).
-    LocalBuffer {
-        buffer: Arc<std::sync::Mutex<Vec<u8>>>,
-    },
+    LiveGrpc,
+    LocalBuffer,
 }
 
-/// In-process pulse capture; forwards PCM live to gRPC when configured.
+/// Timestamp-only handle; PCM comes from the always-on pre-roll recorder.
 pub struct CaptureHandle {
     started: Instant,
-    stop: Arc<AtomicBool>,
-    pcm_tx: Option<mpsc::Sender<Vec<u8>>>,
-    _recorder: tokio::task::JoinHandle<()>,
     backend: CaptureBackend,
 }
 
@@ -57,7 +46,7 @@ pub fn env_ms(name: &str, default: u64) -> u64 {
 pub fn load_config(pulse_source: &str, backend: &crate::dbus_hfp::HfpBackend) -> Config {
     let capture_sco_delay_ms = match backend {
         crate::dbus_hfp::HfpBackend::Pulse { .. } => 0,
-        _ => env_ms("CAPTURE_SCO_DELAY_MS", 400),
+        _ => env_ms("CAPTURE_SCO_DELAY_MS", 0),
     };
     Config {
         whisper_binary: std::env::var("WHISPER_BIN")
@@ -75,60 +64,44 @@ pub fn load_config(pulse_source: &str, backend: &crate::dbus_hfp::HfpBackend) ->
     }
 }
 
-pub async fn start_capture(cfg: &Config) -> Result<CaptureHandle> {
-    crate::audio::unsuspend_source(&cfg.pulse_source)?;
+pub async fn warm_sco(cfg: &Config) -> Result<()> {
+    quick_prepare_sco(cfg).await
+}
 
-    let sco_delay = Duration::from_millis(cfg.capture_sco_delay_ms);
-    if !sco_delay.is_zero() {
-        tokio::time::sleep(sco_delay).await;
-    }
-
-    let (pcm_tx, pcm_rx) = mpsc::channel(64);
-    let stop = Arc::new(AtomicBool::new(false));
-    let recorder = crate::audio::spawn_recorder(&cfg.pulse_source, pcm_tx.clone(), stop.clone())?;
-
-    let backend = if let Some(addr) = cfg.whisper_grpc_addr.clone() {
-        let (result_tx, result_rx) = oneshot::channel();
-        let sink = cfg.pulse_sink.clone();
-        tokio::spawn(async move {
-            let event = run_live_grpc(&addr, pcm_rx, sink.as_deref()).await;
-            let _ = result_tx.send(event);
-        });
-        CaptureBackend::LiveGrpc { result_rx }
+pub async fn start_capture(
+    cfg: &Config,
+    preroll: &Arc<crate::audio::PreRollRecorder>,
+) -> Result<CaptureHandle> {
+    let started = Instant::now();
+    quick_prepare_sco(cfg).await?;
+    let preroll_ms = env_ms("PREROLL_MS", 3000);
+    preroll.begin_session(preroll_ms);
+    let ready = wait_for_sco_running(&cfg.pulse_source).await;
+    if ready {
+        eprintln!("SCO mic RUNNING");
     } else {
-        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let buffer_task = buffer.clone();
-        tokio::spawn(async move {
-            drain_pcm_to_buffer(pcm_rx, buffer_task).await;
-        });
-        CaptureBackend::LocalBuffer { buffer }
-    };
-
-    tracing::info!(source = %cfg.pulse_source, live_grpc = cfg.whisper_grpc_addr.is_some(), "capture started");
-
-    Ok(CaptureHandle {
-        started: Instant::now(),
-        stop,
-        pcm_tx: Some(pcm_tx),
-        _recorder: recorder,
-        backend,
-    })
-}
-
-async fn drain_pcm_to_buffer(
-    mut pcm_rx: mpsc::Receiver<Vec<u8>>,
-    buffer: Arc<std::sync::Mutex<Vec<u8>>>,
-) {
-    while let Some(chunk) = pcm_rx.recv().await {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.extend_from_slice(&chunk);
-        }
+        eprintln!("SCO mic not RUNNING yet — continuing capture");
     }
+    let backend = if cfg.whisper_grpc_addr.is_some() {
+        CaptureBackend::LiveGrpc
+    } else {
+        CaptureBackend::LocalBuffer
+    };
+    tracing::info!(source = %cfg.pulse_source, preroll_ms, "capture started");
+    Ok(CaptureHandle { started, backend })
 }
 
-async fn run_live_grpc(addr: &str, pcm_rx: mpsc::Receiver<Vec<u8>>, sink: Option<&str>) -> Event {
-    tracing::info!(%addr, "streaming mic PCM to whisper gRPC");
-    match crate::grpc_transcribe::transcribe_live(addr, pcm_rx, sink).await {
+async fn run_live_grpc_buffer(
+    cfg: &Config,
+    pcm: Vec<u8>,
+) -> Event {
+    let addr = match cfg.whisper_grpc_addr.as_deref() {
+        Some(a) => a,
+        None => return Event::TranscriptFailed,
+    };
+    eprintln!("sending {} bytes to whisper gRPC", pcm.len());
+    tracing::info!(%addr, bytes = pcm.len(), "uploading capture to whisper gRPC");
+    match crate::grpc_transcribe::transcribe_pcm(addr, pcm, cfg.pulse_sink.as_deref()).await {
         Ok(result) => {
             let trimmed = result.text.trim();
             if trimmed.is_empty() {
@@ -139,8 +112,9 @@ async fn run_live_grpc(addr: &str, pcm_rx: mpsc::Receiver<Vec<u8>>, sink: Option
                 tracing::info!(transcript = %trimmed, "user said");
             }
             if !result.played_response {
-                say_thank_you(sink).await;
+                say_thank_you(cfg.pulse_sink.as_deref()).await;
             }
+            eprintln!("transcript ready");
             Event::TranscriptReady(result.text)
         }
         Err(e) => {
@@ -151,7 +125,11 @@ async fn run_live_grpc(addr: &str, pcm_rx: mpsc::Receiver<Vec<u8>>, sink: Option
     }
 }
 
-pub async fn stop_capture_and_transcribe(cfg: &Config, mut handle: CaptureHandle) -> Event {
+pub async fn stop_capture_and_transcribe(
+    cfg: &Config,
+    handle: CaptureHandle,
+    preroll: &Arc<crate::audio::PreRollRecorder>,
+) -> Event {
     tracing::info!("stopping capture");
 
     let min_capture = Duration::from_millis(env_ms("MIN_CAPTURE_MS", 1500));
@@ -160,29 +138,23 @@ pub async fn stop_capture_and_transcribe(cfg: &Config, mut handle: CaptureHandle
         tokio::time::sleep(min_capture - recorded).await;
     }
 
-    handle.stop.store(true, Ordering::Relaxed);
-    drop(handle.pcm_tx.take());
+    let pcm = preroll.end_session();
+    let event = if pcm.len() < MIN_PCM_BYTES {
+        eprintln!("capture too small ({} bytes) — SCO may not have opened", pcm.len());
+        tracing::warn!(bytes = pcm.len(), "capture too small");
+        Event::TranscriptFailed
+    } else {
+        match handle.backend {
+            CaptureBackend::LiveGrpc => run_live_grpc_buffer(cfg, pcm).await,
+            CaptureBackend::LocalBuffer => run_local_whisper(cfg, pcm).await,
+        }
+    };
 
     release_sco_mic(cfg).await;
-
-    if cfg.whisper_grpc_addr.is_some() {
-        let delay = Duration::from_millis(env_ms("PLAYBACK_SINK_DELAY_MS", 800));
-        tokio::time::sleep(delay).await;
-    }
-
-    match handle.backend {
-        CaptureBackend::LiveGrpc { result_rx } => {
-            result_rx.await.unwrap_or(Event::TranscriptFailed)
-        }
-        CaptureBackend::LocalBuffer { buffer } => {
-            let _ = handle._recorder.await;
-            run_local_whisper(cfg, buffer).await
-        }
-    }
+    event
 }
 
-async fn run_local_whisper(cfg: &Config, buffer: Arc<std::sync::Mutex<Vec<u8>>>) -> Event {
-    let pcm = buffer.lock().ok().map(|b| b.clone()).unwrap_or_default();
+async fn run_local_whisper(cfg: &Config, pcm: Vec<u8>) -> Event {
     if pcm.len() < MIN_PCM_BYTES {
         tracing::warn!(
             bytes = pcm.len(),
@@ -274,6 +246,10 @@ async fn run_whisper_cli(cfg: &Config, path: &std::path::Path) -> Result<String>
 /// Drop the HFP SCO session so the QC mic leaves RUNNING (Bose often keeps
 /// SCO open after AT+BVRA=1 until the source is suspended).
 async fn release_sco_mic(cfg: &Config) {
+    if env_ms("SCO_SUSPEND_ON_RELEASE", 0) == 0 {
+        return;
+    }
+
     match Command::new("pactl")
         .args(["suspend-source", &cfg.pulse_source, "1"])
         .status()
@@ -286,6 +262,10 @@ async fn release_sco_mic(cfg: &Config) {
         Err(e) => tracing::warn!("pactl suspend-source failed: {e}"),
     }
 
+    if env_ms("HFP_PROFILE_CYCLE", 1) == 0 {
+        return;
+    }
+
     let card = pulse_card_for_source(&cfg.pulse_source).await;
     if let Some(card) = card {
         cycle_hfp_profile(&card).await;
@@ -295,6 +275,77 @@ async fn release_sco_mic(cfg: &Config) {
             "could not resolve Pulse card for profile cycle"
         );
     }
+}
+
+/// Fast SCO prep — unsuspend and ensure HFP. No profile cycling (that takes ~1s).
+async fn quick_prepare_sco(cfg: &Config) -> Result<()> {
+    crate::audio::unsuspend_source(&cfg.pulse_source)?;
+    if let Some(card) = pulse_card_for_source(&cfg.pulse_source).await {
+        let _ = Command::new("pactl")
+            .args(["set-card-profile", &card, "headset-head-unit"])
+            .status()
+            .await;
+    }
+    Ok(())
+}
+
+/// Full SCO reset (a2dp ↔ HFP). Used only when `SCO_RESET_ON_START=1` or after failed capture.
+async fn reset_sco(cfg: &Config) -> Result<()> {
+    if env_ms("SCO_RESET_ON_START", 0) == 0 {
+        return quick_prepare_sco(cfg).await;
+    }
+
+    let _ = Command::new("pactl")
+        .args(["suspend-source", &cfg.pulse_source, "1"])
+        .status()
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    if let Some(card) = pulse_card_for_source(&cfg.pulse_source).await {
+        for profile in ["a2dp-sink", "headset-head-unit"] {
+            let _ = Command::new("pactl")
+                .args(["set-card-profile", &card, profile])
+                .status()
+                .await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    }
+
+    quick_prepare_sco(cfg).await
+}
+
+/// Wait until the bluez mic source is RUNNING (SCO open).
+async fn wait_for_sco_running(source: &str) -> bool {
+    let timeout = Duration::from_millis(env_ms("SCO_READY_TIMEOUT_MS", 3000));
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if pulse_source_running(source).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn pulse_source_running(source: &str) -> bool {
+    let output = Command::new("pactl")
+        .args(["list", "sources", "short"])
+        .output()
+        .await;
+    let Ok(o) = output else {
+        return false;
+    };
+    if !o.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        parts.next();
+        match (parts.next(), parts.last()) {
+            (Some(name), Some(state)) => name == source && state == "RUNNING",
+            _ => false,
+        }
+    })
 }
 
 async fn pulse_card_for_source(source: &str) -> Option<String> {
